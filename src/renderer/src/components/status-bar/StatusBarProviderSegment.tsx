@@ -171,42 +171,42 @@ function isVisibleStatusBarBucket(name: string): boolean {
   return STATUS_BAR_BUCKET_NAMES.has(name) || isCursorUsageBucket(name)
 }
 
-function VerboseProviderUsage({
-  p,
-  display
-}: {
-  p: ProviderRateLimits
-  display: UsagePercentageDisplay
-}): React.JSX.Element {
+type VerboseUsageChip =
+  | { kind: 'bucket'; key: string; name: string; usedPercent: number }
+  | { kind: 'window'; key: string; window: RateLimitWindow; label: string }
+
+// The chips the verbose footer renders, in render order. The mini bar reads the
+// first one from here so it can't drift from the number printed beside it.
+function getVerboseUsageChips(p: ProviderRateLimits): VerboseUsageChip[] {
   if (p.buckets && p.buckets.length > 0) {
     const visibleBuckets = p.buckets.filter((bucket) => isVisibleStatusBarBucket(bucket.name))
+    if (visibleBuckets.length > 0) {
+      return visibleBuckets.map((bucket) => ({
+        kind: 'bucket',
+        key: bucket.name,
+        name: bucket.name,
+        usedPercent: bucket.usedPercent
+      }))
+    }
     // Why: a provider whose buckets are all filtered out still has a headline
     // window worth showing rather than rendering an empty segment.
     const fallbackWindow = p.session ?? p.monthly ?? null
-    return (
-      <>
-        {visibleBuckets.map((bucket, index) => (
-          <React.Fragment key={bucket.name}>
-            {index > 0 ? <span className="text-muted-foreground">·</span> : null}
-            <span className="tabular-nums">
-              {bucket.name} {formatUsagePercentageLabel(bucket.usedPercent, display)}
-            </span>
-          </React.Fragment>
-        ))}
-        {visibleBuckets.length === 0 && fallbackWindow ? (
-          <WindowLabel
-            w={fallbackWindow}
-            label={formatRateLimitWindowChipLabel(fallbackWindow)}
-            display={display}
-          />
-        ) : null}
-      </>
-    )
+    return fallbackWindow
+      ? [
+          {
+            kind: 'window',
+            key: 'fallback',
+            window: fallbackWindow,
+            label: formatRateLimitWindowChipLabel(fallbackWindow)
+          }
+        ]
+      : []
   }
 
-  const visibleWindows = [
+  const windowChips: (VerboseUsageChip | null)[] = [
     p.session
       ? {
+          kind: 'window',
           key: 'session',
           window: p.session,
           label: formatRateLimitWindowChipLabel(p.session)
@@ -214,6 +214,7 @@ function VerboseProviderUsage({
       : null,
     p.weekly
       ? {
+          kind: 'window',
           key: 'weekly',
           window: p.weekly,
           label: formatRateLimitWindowChipLabel(p.weekly)
@@ -221,6 +222,7 @@ function VerboseProviderUsage({
       : null,
     p.fableWeekly
       ? {
+          kind: 'window',
           key: 'fableWeekly',
           window: p.fableWeekly,
           label: translate('auto.components.status.bar.StatusBar.a79c64f87e', 'Fable')
@@ -229,21 +231,48 @@ function VerboseProviderUsage({
     // Why: monthly stays inline for monthly-only providers; otherwise the detail panel carries it.
     p.monthly && !p.session && !p.weekly
       ? {
+          kind: 'window',
           key: 'monthly',
           window: p.monthly,
           label: formatRateLimitWindowChipLabel(p.monthly)
         }
       : null
-  ].filter((window): window is { key: string; window: RateLimitWindow; label: string } => {
-    return window !== null
-  })
+  ]
+  return windowChips.filter((chip): chip is VerboseUsageChip => chip !== null)
+}
 
+// Why: the verbose mini bar sits directly left of the first chip, so it must track
+// that chip's window. #11376 folded verbose onto the compact bar, which is fed by
+// the *tightest* window — right there, where the tightest window is the only chip
+// rendered, but in verbose mode it left a freshly reset "1% used" session sitting
+// next to a bar still filled to the untouched weekly window.
+export function getVerboseLeadUsedPercent(p: ProviderRateLimits): number | null {
+  const [lead] = getVerboseUsageChips(p)
+  if (!lead) {
+    return null
+  }
+  return lead.kind === 'bucket' ? lead.usedPercent : lead.window.usedPercent
+}
+
+function VerboseProviderUsage({
+  p,
+  display
+}: {
+  p: ProviderRateLimits
+  display: UsagePercentageDisplay
+}): React.JSX.Element {
   return (
     <>
-      {visibleWindows.map((window, index) => (
-        <React.Fragment key={window.key}>
+      {getVerboseUsageChips(p).map((chip, index) => (
+        <React.Fragment key={chip.key}>
           {index > 0 ? <span className="text-muted-foreground">·</span> : null}
-          <WindowLabel w={window.window} label={window.label} display={display} />
+          {chip.kind === 'bucket' ? (
+            <span className="tabular-nums">
+              {chip.name} {formatUsagePercentageLabel(chip.usedPercent, display)}
+            </span>
+          ) : (
+            <WindowLabel w={chip.window} label={chip.label} display={display} />
+          )}
         </React.Fragment>
       ))}
     </>
@@ -308,14 +337,15 @@ export function ProviderSegment({
 
   // Has data (ok, fetching with stale data, or error with stale data)
   const isStale = p.status === 'error'
+  const verboseLeadUsedPercent = getVerboseLeadUsedPercent(p)
 
   return (
     <span className="inline-flex items-center gap-1.5">
       <ProviderIcon provider={provider} />
       {mode === 'verbose' ? (
         <>
-          {tightest && !compact ? (
-            <MiniBar usedPct={clampUsedPercent(tightest.window.usedPercent)} display={display} />
+          {verboseLeadUsedPercent !== null && !compact ? (
+            <MiniBar usedPct={clampUsedPercent(verboseLeadUsedPercent)} display={display} />
           ) : null}
           <VerboseProviderUsage p={p} display={display} />
         </>
